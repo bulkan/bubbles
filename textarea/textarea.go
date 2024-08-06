@@ -641,9 +641,9 @@ func (m *Model) transposeLeft() {
 	}
 }
 
-// deleteWordLeft deletes the word left to the cursor. Returns whether or not
+// DeleteWordLeft deletes the word left to the cursor. Returns whether or not
 // the cursor blink should be reset.
-func (m *Model) deleteWordLeft() {
+func (m *Model) DeleteWordLeft() {
 	if m.col == 0 || len(m.value[m.row]) == 0 {
 		return
 	}
@@ -681,8 +681,8 @@ func (m *Model) deleteWordLeft() {
 	}
 }
 
-// deleteWordRight deletes the word right to the cursor.
-func (m *Model) deleteWordRight() {
+// DeleteWordRight deletes the word right to the cursor.
+func (m *Model) DeleteWordRight() {
 	if m.col >= len(m.value[m.row]) || len(m.value[m.row]) == 0 {
 		return
 	}
@@ -1014,14 +1014,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.mergeLineAbove(m.row)
 				break
 			}
-			m.deleteWordLeft()
+			m.DeleteWordLeft()
 		case key.Matches(msg, m.KeyMap.DeleteWordForward):
 			m.col = clamp(m.col, 0, len(m.value[m.row]))
 			if m.col >= len(m.value[m.row]) {
 				m.mergeLineBelow(m.row)
 				break
 			}
-			m.deleteWordRight()
+			m.DeleteWordRight()
 		case key.Matches(msg, m.KeyMap.InsertNewline):
 			if m.MaxHeight > 0 && len(m.value) >= m.MaxHeight {
 				return m, nil
