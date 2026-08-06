@@ -29,6 +29,19 @@ func nextID() int {
 	return int(atomic.AddInt64(&lastID, 1))
 }
 
+// LabelAlignment specifies how the label is aligned within the progress bar.
+type LabelAlignment int
+
+// Label alignment options.
+const (
+	// LabelAlignCenter centers the label within the progress bar.
+	LabelAlignCenter LabelAlignment = iota
+	// LabelAlignLeft left-aligns the label within the progress bar.
+	LabelAlignLeft
+	// LabelAlignRight right-aligns the label within the progress bar.
+	LabelAlignRight
+)
+
 const (
 	// DefaultFullCharHalfBlock is the default character used to fill the progress
 	// bar. It is a half block, which allows more granular color blending control,
@@ -52,10 +65,11 @@ const (
 )
 
 var (
-	defaultBlendStart = lipgloss.Color("#5A56E0") // Purple haze.
-	defaultBlendEnd   = lipgloss.Color("#EE6FF8") // Neon pink.
-	defaultFullColor  = lipgloss.Color("#7571F9") // Blueberry.
-	defaultEmptyColor = lipgloss.Color("#606060") // Slate gray.
+	defaultBlendStart       = lipgloss.Color("#5A56E0") // Purple haze.
+	defaultBlendEnd         = lipgloss.Color("#EE6FF8") // Neon pink.
+	defaultFullColor        = lipgloss.Color("#7571F9") // Blueberry.
+	defaultEmptyColor       = lipgloss.Color("#606060") // Slate gray.
+	defaultLabelActiveColor = lipgloss.Color("#1A1A1A")
 )
 
 // Option is used to set options in [New]. For example:
@@ -138,6 +152,43 @@ func WithFillCharacters(full rune, empty rune) Option {
 	}
 }
 
+// WithLabel sets a label that will be rendered within the progress bar, on
+// top of the fill. By default it's centered; use [WithLabelAlignment] to
+// change the alignment. If the label is wider than the bar it won't be
+// rendered.
+func WithLabel(label string) Option {
+	return func(m *Model) {
+		m.Label = label
+	}
+}
+
+// WithLabelAlignment sets the alignment of the label within the progress bar.
+// The default is to center the label.
+func WithLabelAlignment(a LabelAlignment) Option {
+	return func(m *Model) {
+		m.LabelAlignment = a
+	}
+}
+
+// WithLabelStyle sets the style of label characters that the fill hasn't
+// reached yet.
+func WithLabelStyle(style lipgloss.Style) Option {
+	return func(m *Model) {
+		m.LabelStyle = style
+	}
+}
+
+// WithLabelActiveStyle sets the style of label characters that the fill has
+// crossed. Its foreground is used as the text color; its background defaults
+// to the bar's fill color at that position, so the label appears painted on
+// the bar. Only the foreground and background colors of the style are
+// applied; other style properties are ignored for these characters.
+func WithLabelActiveStyle(style lipgloss.Style) Option {
+	return func(m *Model) {
+		m.LabelActiveStyle = style
+	}
+}
+
 // WithoutPercentage hides the numeric percentage.
 func WithoutPercentage() Option {
 	return func(m *Model) {
@@ -208,6 +259,17 @@ type Model struct {
 	PercentFormat   string // a fmt string for a float
 	PercentageStyle lipgloss.Style
 
+	// LabelStyle is applied to label characters that the fill hasn't reached
+	// yet. LabelActiveStyle is applied to characters the fill has crossed: its
+	// foreground is the text color and its background defaults to the bar's
+	// fill color, so the label appears painted on the bar.
+	Label            string
+	LabelStyle       lipgloss.Style
+	LabelActiveStyle lipgloss.Style
+	// LabelAlignment determines how the label is aligned within the progress
+	// bar. The default is LabelAlignCenter.
+	LabelAlignment LabelAlignment
+
 	// Members for animated transitions.
 	spring           harmonica.Spring
 	springCustomized bool
@@ -239,6 +301,7 @@ func New(opts ...Option) Model {
 		EmptyColor:     defaultEmptyColor,
 		ShowPercentage: true,
 		PercentFormat:  " %3.0f%%",
+		LabelAlignment: LabelAlignCenter,
 	}
 
 	for _, opt := range opts {
@@ -362,6 +425,11 @@ func (m Model) barView(b *strings.Builder, percent float64, textWidth int) {
 
 	fw = max(0, min(tw, fw))
 
+	if lw := ansi.StringWidth(m.Label); lw > 0 && lw <= tw {
+		m.labelView(b, percent, tw, fw, lw)
+		return
+	}
+
 	isHalfBlock := m.Full == DefaultFullCharHalfBlock
 
 	if m.colorFunc != nil { //nolint:nestif
@@ -418,6 +486,136 @@ func (m Model) barView(b *strings.Builder, percent float64, textWidth int) {
 	b.WriteString(lipgloss.NewStyle().
 		Foreground(m.EmptyColor).
 		Render(strings.Repeat(string(m.Empty), n)))
+}
+
+func (m Model) labelView(b *strings.Builder, percent float64, tw, fw, lw int) {
+	var ls int // label start column
+	switch m.LabelAlignment {
+	case LabelAlignLeft:
+		ls = 0
+	case LabelAlignRight:
+		ls = max(0, tw-lw)
+	default:
+		ls = max(0, (tw-lw)/2)
+	}
+	le := min(tw, ls+lw) // label end column
+
+	blend := m.makeBlend(tw, fw)
+
+	label := []rune(m.Label)
+	for i := 0; i < tw; i++ {
+		switch {
+		case i >= ls && i < le:
+			j := i - ls
+			if j >= len(label) {
+				continue
+			}
+			if i < fw {
+				b.WriteString(m.paintedLabelChar(label[j], percent, i, tw, blend))
+			} else {
+				b.WriteString(m.LabelStyle.Inline(true).Render(string(label[j])))
+			}
+		case i < fw:
+			b.WriteString(m.fillChar(percent, i, tw, blend))
+		default:
+			b.WriteString(lipgloss.NewStyle().
+				Foreground(m.EmptyColor).
+				Render(string(m.Empty)))
+		}
+	}
+}
+
+// makeBlend precomputes the blend colors for the fill, or returns nil when no
+// blend is configured.
+func (m Model) makeBlend(tw, fw int) []color.Color {
+	if len(m.blend) == 0 {
+		return nil
+	}
+
+	multiplier := 1
+	if m.Full == DefaultFullCharHalfBlock {
+		multiplier = 2
+	}
+
+	if m.scaleBlend {
+		return lipgloss.Blend1D(fw*multiplier, m.blend...)
+	}
+	return lipgloss.Blend1D(tw*multiplier, m.blend...)
+}
+
+// fillChar returns the rendered filled character for bar column i, applying
+// the colorFunc, blend, or solid fill mode.
+func (m Model) fillChar(percent float64, i, tw int, blend []color.Color) string {
+	if m.colorFunc != nil {
+		var style lipgloss.Style
+		current := float64(i) / float64(tw)
+		style = style.Foreground(m.colorFunc(percent, current))
+		if m.Full == DefaultFullCharHalfBlock {
+			style = style.Background(m.colorFunc(percent, min(current+0.5/float64(tw), 1)))
+		}
+		return style.Render(string(m.Full))
+	}
+
+	if blend != nil {
+		multiplier := 1
+		if m.Full == DefaultFullCharHalfBlock {
+			multiplier = 2
+		}
+		if m.Full == DefaultFullCharHalfBlock {
+			return lipgloss.NewStyle().
+				Foreground(blend[i*multiplier]).
+				Background(blend[i*multiplier+1]).
+				Render(string(m.Full))
+		}
+		return lipgloss.NewStyle().
+			Foreground(blend[i*multiplier]).
+			Render(string(m.Full))
+	}
+
+	// Solid fill.
+	return lipgloss.NewStyle().
+		Foreground(m.FullColor).
+		Render(string(m.Full))
+}
+
+// fillColor returns the color of the fill at bar column i, used as the
+// background of label characters painted on the bar. In blend mode this is
+// the cell's primary color.
+func (m Model) fillColor(percent float64, i, tw int, blend []color.Color) color.Color {
+	if m.colorFunc != nil {
+		return m.colorFunc(percent, float64(i)/float64(tw))
+	}
+	if blend != nil {
+		multiplier := 1
+		if m.Full == DefaultFullCharHalfBlock {
+			multiplier = 2
+		}
+		return blend[i*multiplier]
+	}
+	return m.FullColor
+}
+
+// paintedLabelChar renders a single label character that the fill has
+// crossed. The character is drawn in the active label style's foreground
+// color on the bar's fill color, so it appears painted on the bar.
+func (m Model) paintedLabelChar(ch rune, percent float64, i, tw int, blend []color.Color) string {
+	var (
+		fg = m.LabelActiveStyle.GetForeground()
+		bg = m.LabelActiveStyle.GetBackground()
+	)
+
+	// Foreground from the active style, defaulting to a dark color.
+	if _, ok := fg.(lipgloss.NoColor); ok {
+		fg = defaultLabelActiveColor
+	}
+
+	// Background defaults to the bar's fill color at this column; an explicit
+	// background in the active style overrides it.
+	if _, ok := bg.(lipgloss.NoColor); ok {
+		bg = m.fillColor(percent, i, tw, blend)
+	}
+
+	return lipgloss.NewStyle().Foreground(fg).Background(bg).Render(string(ch))
 }
 
 func (m Model) percentageView(percent float64) string {
